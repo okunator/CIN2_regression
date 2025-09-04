@@ -14,11 +14,17 @@ from histolytics.wsi.wsi_processor import WSIGridProcessor
 from pandarallel import pandarallel
 from tqdm import tqdm
 
+from norm import get_macenko_stain_matrix, normalize_stains
 from utils import get_grid_and_translate, read_data
 
 
 def neoplastic_nuclei_features(
-    wsi_path: str, tis_path: str, nuc_path: str
+    wsi_path: str,
+    tis_path: str,
+    nuc_path: str,
+    neo_nuc_cls: str = "neoplastic",
+    neo_tis_cls: str = "area_cin",
+    norm: bool = False,
 ) -> pd.Series:
     """Run  morphological feature extraction pipeline for one segmented WSI.
 
@@ -65,6 +71,9 @@ def neoplastic_nuclei_features(
         wsi_path (str): Path to the whole slide image (WSI) file.
         tis_path (str): Path to the tissue annotation file.
         nuc_path (str): Path to the nuclear annotation file.
+        neo_nuc_cls (str): Class name for neoplastic nuclei.
+        neo_tis_cls (str): Class name for neoplastic tissue.
+        norm (bool): Whether to Macenko normalize the image patches during intensity feature extraction.
 
     Returns:
         pd.Series: A series containing the extracted neoplastic nuclei features.
@@ -78,9 +87,9 @@ def neoplastic_nuclei_features(
     nuc = set_crs(nuc)
 
     # fit grid and translate (overlay to WSI)
-    grid, neo_nuc, _ = get_grid_and_translate(
-        tis[tis["class_name"] == "area_cin"],
-        nuc[nuc["class_name"] == "neoplastic"],
+    grid, _, neo_nuc = get_grid_and_translate(
+        tis[tis["class_name"] == neo_tis_cls],
+        nuc[nuc["class_name"] == neo_nuc_cls],
         reader,
         patch_size=(256, 256),
         translate=True,
@@ -89,10 +98,7 @@ def neoplastic_nuclei_features(
 
     # compute nuclear and patch level intensity and chromatin clump features for neoplastic nuclei
     nuc_intensity_feats, nuc_chrom_feats, _, _ = nuclear_intensity_pipeline(
-        reader=reader,
-        grid=grid,
-        nuc=neo_nuc,
-        num_processes=8,
+        reader=reader, grid=grid, nuc=neo_nuc, num_processes=8, norm=norm
     )
 
     # compute nuclear and patch level morphological features for neoplastic nuclei
@@ -120,6 +126,7 @@ def nuclear_intensity_pipeline(
     reader: SlideReader,
     grid: gpd.GeoDataFrame,
     nuc: gpd.GeoDataFrame,
+    norm: bool = False,
     num_processes: int = 8,
     pbar: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -139,6 +146,7 @@ def nuclear_intensity_pipeline(
         reader (SlideReader): SlideReader instance for reading WSI.
         grid (gpd.GeoDataFrame): GeoDataFrame containing patch geometries.
         nuc (gpd.GeoDataFrame): GeoDataFrame containing nuclear annotations.
+        norm (bool): whether to Macenko normalize the image patches.
         num_processes (int): Number of processes to use for parallel processing.
         pbar (bool): Whether to display a progress bar.
 
@@ -154,7 +162,7 @@ def nuclear_intensity_pipeline(
         reader=reader,
         grid=grid,
         nuc=nuc,
-        pipeline=_gray_intensity_pipeline,
+        pipeline=partial(_gray_intensity_pipeline, norm=norm),
         num_processes=num_processes,
         pbar=pbar,
     )
@@ -172,6 +180,7 @@ def nuclear_intensity_pipeline(
             _chromatin_feats_pipeline,
             mean=intensity_mean,  # slide level standardization
             std=intensity_std,
+            norm=norm,
         ),
         num_processes=num_processes,
         pbar=pbar,
@@ -250,7 +259,9 @@ def nuclear_morpho_pipeline(
     return nuc, patches
 
 
-def _gray_intensity_pipeline(img: np.ndarray, label: np.ndarray, mask: np.ndarray):
+def _gray_intensity_pipeline(
+    img: np.ndarray, label: np.ndarray, mask: np.ndarray, norm: bool = False
+):
     """Compute grayscale intensity features for a given image patch.
 
     The computed features are:
@@ -263,6 +274,7 @@ def _gray_intensity_pipeline(img: np.ndarray, label: np.ndarray, mask: np.ndarra
         img (np.ndarray): RGB image patch. (H, W, C)
         label (np.ndarray): nuclei label mask patch. (H, W)
         mask (np.ndarray): tissue mask patch. (H, W)
+        norm (bool): whether to Macenko normalize the image patch.
 
     Returns:
         pd.DataFrame: Nuclear-level intensity features for this patch
@@ -279,6 +291,10 @@ def _gray_intensity_pipeline(img: np.ndarray, label: np.ndarray, mask: np.ndarra
 
     # Try to compute features, but handle the case where we can't compute both mean and std
     try:
+        if norm:
+            stain_mat = get_macenko_stain_matrix(img)
+            img = normalize_stains(img, stain_mat)
+
         gray_feats: pd.DataFrame = grayscale_intensity_feats(
             img, label, ["mean", "std", "skewness"]
         )
@@ -305,6 +321,10 @@ def _gray_intensity_pipeline(img: np.ndarray, label: np.ndarray, mask: np.ndarra
         if "Shape of passed values" in str(e):
             # Try with just mean first, then std if that fails
             try:
+                if norm:
+                    stain_mat = get_macenko_stain_matrix(img)
+                    img = normalize_stains(img, stain_mat)
+
                 lab, areas = np.unique(label, return_counts=True)
                 gray_feats = grayscale_intensity_feats(img, label, ["mean"])
                 gray_feats = gray_feats.assign(std=0, skewness=0)
@@ -342,6 +362,7 @@ def _chromatin_feats_pipeline(
     mask: np.ndarray,
     mean: float = 0.0,
     std: float = 1.0,
+    norm: bool = False,
 ) -> pd.DataFrame:
     """Compute chromatin clumping features for a given image patch.
 
@@ -358,6 +379,7 @@ def _chromatin_feats_pipeline(
         mask (np.ndarray): tissue mask patch. (H, W)
         mean (float): mean grayscale intensity
         std (float): standard deviation of grayscale intensity
+        norm (bool): whether to Macenko normalize the image patch.
 
     Returns:
         pd.DataFrame: Nuclear-level chromatin clumping features for this patch.
@@ -374,6 +396,10 @@ def _chromatin_feats_pipeline(
         return pd.DataFrame(columns=cols)
 
     try:
+        if norm:
+            stain_mat = get_macenko_stain_matrix(img)
+            img = normalize_stains(img, stain_mat)
+
         chrom_feats: pd.DataFrame = chromatin_feats(
             img,
             label,
