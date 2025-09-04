@@ -38,4 +38,4 @@ def get_grid_and_translate(
         tis = tis.assign(geometry=tis.geometry.translate(xoff=xmin, yoff=ymin))
         nuc = nuc.assign(geometry=nuc.geometry.translate(xoff=xmin, yoff=ymin))
 
-    return grid, nuc, tis
+    return grid, tis, nuc
