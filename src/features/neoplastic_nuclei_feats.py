@@ -8,22 +8,21 @@ from histolytics.nuc_feats.chromatin import chromatin_feats
 from histolytics.nuc_feats.intensity import grayscale_intensity_feats
 from histolytics.spatial_agg.grid_agg import grid_aggregate
 from histolytics.spatial_geom.shape_metrics import shape_metric
-from histolytics.utils.gdf import set_crs
 from histolytics.wsi.slide_reader import SlideReader
 from histolytics.wsi.wsi_processor import WSIGridProcessor
 from pandarallel import pandarallel
 from tqdm import tqdm
 
 from norm import get_macenko_stain_matrix, normalize_stains
-from utils import get_grid_and_translate, read_data
+
+TO_MM_CONVERSION = 0.5 / 1e3  # conversion to mm
+TO_MM_SQUARED_CONVERSION = 0.125 / 1e6  # conversion to mm^2
 
 
-def neoplastic_nuclei_features(
-    wsi_path: str,
-    tis_path: str,
-    nuc_path: str,
-    neo_nuc_cls: str = "neoplastic",
-    neo_tis_cls: str = "area_cin",
+def neoplastic_nuclei_feat_pipeline(
+    reader: SlideReader,
+    neo_nuc: gpd.GeoDataFrame,
+    grid: gpd.GeoDataFrame,
     norm: bool = False,
 ) -> pd.Series:
     """Run  morphological feature extraction pipeline for one segmented WSI.
@@ -68,34 +67,14 @@ def neoplastic_nuclei_features(
         area of each part.
 
     Parameters:
-        wsi_path (str): Path to the whole slide image (WSI) file.
-        tis_path (str): Path to the tissue annotation file.
-        nuc_path (str): Path to the nuclear annotation file.
-        neo_nuc_cls (str): Class name for neoplastic nuclei.
-        neo_tis_cls (str): Class name for neoplastic tissue.
+        reader (SlideReader): SlideReader instance for reading WSI.
+        neo_nuc (gpd.GeoDataFrame): GeoDataFrame containing neoplastic nuclear annotations.
+        grid (gpd.GeoDataFrame): GeoDataFrame containing patch geometries.
         norm (bool): Whether to Macenko normalize the image patches during intensity feature extraction.
 
     Returns:
         pd.Series: A series containing the extracted neoplastic nuclei features.
     """
-    reader, tis, nuc = read_data(
-        wsi_path=wsi_path,
-        tissue_annot_path=tis_path,
-        nuc_annot_path=nuc_path,
-    )
-    tis = set_crs(tis)
-    nuc = set_crs(nuc)
-
-    # fit grid and translate (overlay to WSI)
-    grid, _, neo_nuc = get_grid_and_translate(
-        tis[tis["class_name"] == neo_tis_cls],
-        nuc[nuc["class_name"] == neo_nuc_cls],
-        reader,
-        patch_size=(256, 256),
-        translate=True,
-    )
-    grid = set_crs(grid)
-
     # compute nuclear and patch level intensity and chromatin clump features for neoplastic nuclei
     nuc_intensity_feats, nuc_chrom_feats, _, _ = nuclear_intensity_pipeline(
         reader=reader, grid=grid, nuc=neo_nuc, num_processes=8, norm=norm
@@ -407,6 +386,7 @@ def _chromatin_feats_pipeline(
             mean=mean,
             std=std,
         )
+        chrom_feats["chrom_area"] = chrom_feats["chrom_area"]
 
         # get nuclei areas
         lab, areas = np.unique(label, return_counts=True)
@@ -519,7 +499,7 @@ def _compute_area_weighted_nuc_stats(group):
     """Compute area-weighted statistics for split nuclei."""
     total_area = group["Nuclei Area"].sum()
     numeric_cols = group.select_dtypes(include=[np.number]).columns
-    feature_cols = [col for col in numeric_cols if col != "Nuclei Area"]
+    feature_cols = [col for col in numeric_cols if col not in ["Nuclei Area", "uid"]]
 
     if total_area == 0:
         result = {col: 0.0 for col in feature_cols}
@@ -553,9 +533,17 @@ def _compute_nuclear_summary_stats(nuc_feats, compute_std: bool = True) -> pd.Se
     numeric_cols = nuc_feats.select_dtypes(include=[np.number]).columns
 
     for col in numeric_cols:
-        if col != " Area":
+        if col not in ("Nuclei Area", "index", "uid"):
+            # Unit conversions
+            if col in ("area", "Area of Chromatin Clumps"):
+                nuc_feats[col] = nuc_feats[col] * TO_MM_SQUARED_CONVERSION
+
+            if col in ("major_axis_len", "minor_axis_len"):
+                nuc_feats[col] = nuc_feats[col] * TO_MM_CONVERSION
+
+            # Create clean column name
             clean_name = col.replace("_", " ").title()
-            clean_name += " Neoplastic "
+            clean_name += " Neoplastic Nuclei"
 
             mean_val = nuc_feats[col].mean()
             mean_name = f"Mean {clean_name}" if "Mean" not in clean_name else clean_name
