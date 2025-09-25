@@ -8,6 +8,7 @@ Note:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Sequence
 
 import mapclassify
@@ -156,6 +157,11 @@ def beeswarm_plot(
     ax: plt.Axes | None = None,
     rng_seed: int | None = 42,
     show: bool = True,
+    x_label: str = "SHAP-IQ Interaction Value (impact on model output)",
+    label_fontsize: int = 26,
+    x_tick_size: int = 24,
+    y_tick_size: int = 34,
+    save_path: str | Path | None = None,
 ) -> plt.Axes | None:
     """Plots a beeswarm plot of SHAP-IQ interaction values. Based on the SHAP beeswarm plot[1]_.
 
@@ -176,6 +182,7 @@ def beeswarm_plot(
         ax: ``Matplotlib Axes`` object to plot on. If ``None``, a new figure and axes will be created.
         rng_seed: Random seed for reproducibility. Defaults to 42.
         show: Whether to show the plot. Defaults to ``True``. If ``False``, the function returns the axis of the plot.
+        save_path: Path to save the plot. If ``None``, the plot is not saved. Defaults to ``None``.
 
     Returns:
         If ``show`` is ``False``, the function returns the axis of the plot. Otherwise, it returns
@@ -262,12 +269,15 @@ def beeswarm_plot(
     total_sub_features = sum(len(inter) for inter in interactions_to_plot)
     if ax is None:
         fig_height = total_sub_features * row_height + 1.5
-        fig_width = 8 + 0.3 * max(
+        fig_width = 8 + 0.3
+
+        max_name_len = max(
             [
                 np.max([len(feature_mapping[f]) for f in interaction])
                 for interaction in interactions_to_plot
             ]
         )
+        fig_width += 0.5 * max_name_len
         ax = plt.gca()
         fig = plt.gcf()
         fig.set_size_inches(fig_width, fig_height)
@@ -407,11 +417,8 @@ def beeswarm_plot(
     ax.axvline(x=0, color="#999999", linestyle="-", linewidth=1, zorder=1)
     ax.set_axisbelow(True)
 
-    ax.set_xlabel("SHAP-IQ Interaction Value (impact on model output)", fontsize=12)
     ax.set_ylabel("")
-
     ax.tick_params(axis="y", length=0)
-    ax.tick_params(axis="x", labelsize=10)
 
     xlims = ax.get_xlim()
     for y_coords in rectangles:
@@ -451,10 +458,20 @@ def beeswarm_plot(
 
     plt.tight_layout(rect=(0, 0, 0.95, 1))
 
+    ax.set_xlabel(x_label, fontsize=label_fontsize)
+    ax.tick_params(axis="x", labelsize=x_tick_size)
+    ax.tick_params(axis="y", labelsize=y_tick_size)
+
     if not show:
-        return ax
-    plt.show()
-    return None
+        if save_path is not None:
+            fig.subplots_adjust(left=0.35, right=1.0)
+            fig.savefig(save_path)
+            plt.close(fig)
+        else:
+            return ax
+    else:
+        plt.show()
+        return None
 
 
 def group_beeswarm_plot(
