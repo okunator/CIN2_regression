@@ -117,10 +117,9 @@ def plot_conf_mat(
 
 
 def plot_summary_roc_curve(
-    feat_theme: str,
-    fpr_tpr_dfs_all: dict[str, list[pd.DataFrame]],
-    model_names_all: dict[str, list[str]],
-    metrics_all: dict[str, pd.DataFrame],
+    fpr_tpr_dfs: list[pd.DataFrame],
+    model_names: list[str],
+    metrics_df: pd.DataFrame,
     plot_all: bool = True,
     save_path: Path | None = None,
 ) -> plt.Axes:
@@ -139,12 +138,11 @@ def plot_summary_roc_curve(
     """
     fig, ax = plt.subplots(1, 1, figsize=(15, 15))
 
-    best_models = model_names_all[feat_theme]
-    fpr_tpr_dfs = fpr_tpr_dfs_all[feat_theme]
+    best_models = model_names
 
     # get mean and std auc
-    mean_auc = metrics_all[feat_theme]["roc_auc"].mean()
-    std_auc = metrics_all[feat_theme]["roc_auc"].std()
+    mean_auc = metrics_df["roc_auc"].mean()
+    std_auc = metrics_df["roc_auc"].std()
 
     tprs = []
     colors = sns.color_palette("tab20", n_colors=len(best_models)).as_hex()
