@@ -1,3 +1,5 @@
+"""Extract per-sample features from WSIs and segmentation files."""
+
 import warnings
 from pathlib import Path
 
@@ -12,15 +14,15 @@ from utils import get_grid_and_translate, read_data
 
 
 def extract_features(wsi_path: str, tis_path: str, nuc_path: str) -> pd.DataFrame:
-    """Extract features from a WSI given paths to the WSI and its annotations.
+    """Extract features from a WSI given its annotation inputs.
 
-    Parameters:
+    Args:
         wsi_path (str): Path to the WSI file.
         tis_path (str): Path to the tissue annotation file.
         nuc_path (str): Path to the nuclei annotation file.
 
     Returns:
-        pd.DataFrame: A DataFrame containing the extracted features for one sample.
+        pd.DataFrame: A single-row DataFrame containing extracted features.
     """
     reader, tis, nuc = read_data(wsi_path, tis_path, nuc_path)
 
@@ -52,13 +54,16 @@ def extract_features(wsi_path: str, tis_path: str, nuc_path: str) -> pd.DataFram
 def main(
     wsi_folder: Path, nuc_folder: Path, tis_folder: Path, result_folder: Path
 ) -> None:
-    """Main function to extract features from WSIs in a folder.
+    """Extract features for all WSIs in a folder.
 
-    Parameters:
-        wsi_folder (Path): Path to folder with WSI files.
-        nuc_folder (Path): Path to folder with nuclei annotation files.
-        tis_folder (Path): Path to folder with tissue annotation files.
-        result_folder (Path): Path to output folder for feature CSVs.
+    Args:
+        wsi_folder (Path): Folder containing WSI files.
+        nuc_folder (Path): Folder containing nuclei annotation files.
+        tis_folder (Path): Folder containing tissue annotation files.
+        result_folder (Path): Output folder for per-sample feature CSVs.
+
+    Returns:
+        None: Results are written to disk.
     """
     warnings.filterwarnings("ignore")
     result_folder.mkdir(parents=True, exist_ok=True)

@@ -1,3 +1,5 @@
+"""Aggregate sample-level features to patient-level features."""
+
 import argparse
 from pathlib import Path
 
@@ -97,7 +99,16 @@ agg_dict = {
 
 
 def main(result_folder: Path, output_csv: Path = None, patient_col: str = "patient_id"):
-    """Aggregate sample-level features to patient-level."""
+    """Aggregate sample-level features to patient-level.
+
+    Args:
+        result_folder (Path): Folder containing per-sample CSV files.
+        output_csv (Path | None): Output CSV path. Defaults to auto-named file.
+        patient_col (str): Column name used to group samples into patients.
+
+    Returns:
+        None: Aggregated features are written to disk.
+    """
     csv_files = list(result_folder.glob("*.csv"))
     dfs = [pd.read_csv(f) for f in csv_files]
     df_all = pd.concat(dfs, ignore_index=True)

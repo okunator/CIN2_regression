@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 notebook_tests
 .vscode
+tmp*
 
 # C extensions
 *.so

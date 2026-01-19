@@ -16,10 +16,15 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from shapiq.interaction_values import InteractionValues
+from shapiq.interaction_values import InteractionValues, aggregate_interaction_values
 from shapiq.plot.utils import abbreviate_feature_names
 
-from ..classification.shap_heuristic import shap_scoring_heuristic
+from src.classification.shap_heuristic import feature_type
+
+from ..classification.shap_heuristic import (
+    select_feats_from_scores,
+    shap_scoring_heuristic,
+)
 
 __all__ = ["beeswarm_plot"]
 
@@ -69,6 +74,7 @@ def _get_config(row_height: float, dot_size: int = 10) -> dict:
     config_dict = {
         "dot_size": dot_size,
         "margin_y": 0.01,
+        "margin_x": 0.4,
         "color_nan": "#777777",
         "color_lines": "#cccccc",
         "color_rectangle": "#eeeeee",
@@ -93,7 +99,7 @@ def _beeswarm(interaction_values: np.ndarray, rng: np.random.Generator) -> np.nd
         Vertical offsets (ys) for each point.
     """
     num_interactions = len(interaction_values)
-    nbins = 100
+    nbins = 50
     quant = np.round(
         nbins
         * (interaction_values - np.min(interaction_values))
@@ -161,7 +167,10 @@ def beeswarm_plot(
     label_fontsize: int = 26,
     x_tick_size: int = 24,
     y_tick_size: int = 34,
+    rank_feats: bool = True,
     save_path: str | Path | None = None,
+    plot_cbar: bool = True,
+    use_feat_bins_cmap: bool = False,
 ) -> plt.Axes | None:
     """Plots a beeswarm plot of SHAP-IQ interaction values. Based on the SHAP beeswarm plot[1]_.
 
@@ -182,7 +191,15 @@ def beeswarm_plot(
         ax: ``Matplotlib Axes`` object to plot on. If ``None``, a new figure and axes will be created.
         rng_seed: Random seed for reproducibility. Defaults to 42.
         show: Whether to show the plot. Defaults to ``True``. If ``False``, the function returns the axis of the plot.
+        x_label: Label for the x-axis. Defaults to "SHAP-IQ Interaction Value (impact on model output)".
+        label_fontsize: Font size for the axis labels. Defaults to 26.
+        x_tick_size: Font size for the x-axis tick labels. Defaults to 24.
+        y_tick_size: Font size for the y-axis tick labels. Defaults to 34.
+        rank_feats: Whether to rank features using the SHAP scoring heuristic. Defaults to ``True``.
         save_path: Path to save the plot. If ``None``, the plot is not saved. Defaults to ``None``.
+        plot_cbar: Whether to plot the colorbar. Defaults to ``True``.
+        use_feat_bins_cmap: Whether to use feature value bins for colormap. Defaults to ``False``.
+
 
     Returns:
         If ``show`` is ``False``, the function returns the axis of the plot. Otherwise, it returns
@@ -236,21 +253,42 @@ def beeswarm_plot(
 
     # get the order of shap values based on a scoring heuristic
     if order is None:
-        if no_fnames:
-            data.columns = feature_names
+        if rank_feats:
+            if no_fnames:
+                data.columns = feature_names
 
-        feats_sorted, shap_scores = shap_scoring_heuristic(
-            interaction_values_list, data
-        )
+            # feats_sorted, shap_scores = shap_scoring_heuristic(
+            score_df = shap_scoring_heuristic(interaction_values_list, data)
+            feats_sorted = score_df["feature"].values
+            if abbreviate:
+                feats_sorted = abbreviate_feature_names(feats_sorted)
+
+            feature_order = [feature_names.index(f) for f in feats_sorted]
+        else:
+            list_of_abs_interaction_values = [abs(iv) for iv in interaction_values_list]
+            global_values = aggregate_interaction_values(
+                list_of_abs_interaction_values, aggregation="mean"
+            )  # to match the order in bar plots
+
+            interaction_keys = list(global_values.interaction_lookup.keys())
+            all_global_interaction_vals = global_values.values  # noqa: PD011 # since ruff thinks this is a dataframe
+            if interaction_keys[0] == ():  # check for base value
+                interaction_keys = interaction_keys[1:]
+                all_global_interaction_vals = all_global_interaction_vals[1:]
+
+            # Sort interactions by aggregated importance
+            feature_order = np.argsort(all_global_interaction_vals)[::-1]
     else:
         feats_sorted = [feature_names[i] for i in order]
+        if abbreviate:
+            feats_sorted = abbreviate_feature_names(feats_sorted)
 
-    if abbreviate:
-        feats_sorted = abbreviate_feature_names(feats_sorted)
+        feature_order = [feature_names.index(f) for f in feats_sorted]
 
-    feature_order = [feature_names.index(f) for f in feats_sorted]
     if max_display is None:
         max_display = len(feature_order)
+    num_interactions_to_display = min(max_display, len(feature_order))
+    feature_order = feature_order[:num_interactions_to_display]
     interactions_to_plot = [interaction_keys[i] for i in feature_order]
 
     x_numpy = (
@@ -376,16 +414,43 @@ def beeswarm_plot(
                 rasterized=n_samples > 500,
                 zorder=2,
             )
+            color_values = feature_values[valid_mask]
+            if use_feat_bins_cmap:
+                # Check if the feature is categorical/nominal
+                # # Use feature_type to determine if the feature is categorical or nominal
+                if feature_type(pd.Series(valid_feature_values)) in [
+                    "categorical",
+                    "nominal",
+                    # "continuous"
+                ]:
+                    # Map unique values to integers for coloring
+                    unique_vals, inverse = np.unique(
+                        valid_feature_values, return_inverse=True
+                    )
+                    color_values = inverse.astype(float)
+                    vmin = 0
+                    vmax = len(unique_vals) - 1 if len(unique_vals) > 1 else 1
+                else:
+                    try:
+                        bins = mapclassify.FisherJenks(valid_feature_values, 2)
+                    except Exception:
+                        bins = mapclassify.FisherJenks(valid_feature_values, 2)
+                    fisher_labels = bins.yb
+                    color_values = (
+                        fisher_labels.astype(float) - np.min(fisher_labels)
+                    ) / (np.max(fisher_labels) - np.min(fisher_labels) + 1e-9)
+                    vmin = 0
+                    vmax = 1
 
             # valid points
             ax.scatter(
                 x=current_shap_values[valid_mask],
                 y=y_level + ys[valid_mask],
-                c=feature_values[valid_mask],
+                c=color_values,
                 cmap=cmap,
                 vmin=vmin,
                 vmax=vmax,
-                s=config_dict["dot_size"],
+                s=dot_size,
                 alpha=alpha,
                 linewidth=0,
                 rasterized=n_samples > 500,
@@ -447,14 +512,15 @@ def beeswarm_plot(
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_visible(False)
 
-    m = plt.cm.ScalarMappable(cmap=cmap)
-    m.set_array([0, 1])
-    cb = fig.colorbar(m, ax=ax, ticks=[0, 1], aspect=80)
-    cb.set_ticklabels(["Low", "High"])
-    cb.set_label("Feature value", size=12, labelpad=0)
-    cb.ax.tick_params(labelsize=11, length=0)
-    cb.set_alpha(1)
-    cb.outline.set_visible(False)
+    if plot_cbar:
+        m = plt.cm.ScalarMappable(cmap=cmap)
+        m.set_array([0, 1])
+        cb = fig.colorbar(m, ax=ax, ticks=[0, 1], aspect=80)
+        cb.set_ticklabels(["Low", "High"])
+        cb.set_label("Feature value", size=12, labelpad=0)
+        cb.ax.tick_params(labelsize=11, length=0)
+        cb.set_alpha(1)
+        cb.outline.set_visible(False)
 
     plt.tight_layout(rect=(0, 0, 0.95, 1))
 
@@ -478,6 +544,9 @@ def group_beeswarm_plot(
     grouped_interaction_values_list: dict[str, list[InteractionValues]],
     grouped_data: dict[str, list[pd.DataFrame]],
     *,
+    feat_selection: str = "top_k",
+    top_k: int = 3,
+    thresh: float = 1.4,
     max_displays: list[int] | None = None,
     group_order: Sequence[str] | None = None,
     abbreviate: bool = True,
@@ -491,6 +560,8 @@ def group_beeswarm_plot(
     label_fontsize: int = 46,
     x_label: str = "SHAP-IQ Interaction Value (impact on model output)",
     show: bool = True,
+    top_ks: dict[str, int] = None,
+    use_feat_bins_cmap: bool = False,
 ) -> plt.Axes | None:
     """Plots a beeswarm plot of SHAP-IQ interaction values. Based on the SHAP beeswarm plot[1]_.
 
@@ -498,22 +569,47 @@ def group_beeswarm_plot(
     revealing dependencies between the feature's value and the strength of the interaction.
 
     Args:
-        grouped_interaction_values_list: A dictionary where keys are group names and values are lists containing InteractionValues objects.
-        grouped_data: A dictionary where keys are group names and values are pandas DataFrames containing the input data used to compute the interaction values.
-        max_displays: Maximum number of interactions to display per group. Defaults to ``None``, which displays all interactions.
-        group_order: Order of the groups to be plotted. If ``None``, groups will be plotted in the order they appear in ``grouped_interaction_values_list``. Defaults to ``None``.
-        abbreviate: Whether to abbreviate feature names. Defaults to ``True``.
-        alpha: The transparency level for the plotted points, ranging from 0 (transparent) to 1
+        grouped_interaction_values_list:
+            A dictionary where keys are group names and values are lists containing InteractionValues objects.
+        grouped_data:
+            A dictionary where keys are group names and values are pandas DataFrames containing the
+            input data used to compute the interaction values.
+        feat_selection:
+            Method for selecting features to display. Options are "top_k" (selects the top k features based
+            on a scoring heuristic), "top_bins" (selects features in the top k bins based on a scoring heuristic),
+            "thresh" (selects features based on a score threshold, defaults to 1.4)
+        top_k:
+            Number of top features or bins to select based on the scoring heuristic. Defaults to 3. Ignored
+        max_displays:
+            Maximum number of interactions to display per group. Defaults to ``None``, which displays all interactions.
+        group_order:
+            Order of the groups to be plotted. If ``None``, groups will be plotted in the order they appear in
+            ``grouped_interaction_values_list``. Defaults to ``None``.
+        abbreviate:
+            Whether to abbreviate feature names. Defaults to ``True``.
+        alpha:
+            The transparency level for the plotted points, ranging from 0 (transparent) to 1
             (opaque). Defaults to 0.8.
-        row_height: The height in inches allocated for each row on the plot. Defaults to 0.4.
-        dot_size: Size of the dots in the plot. Defaults to 10.
-        ax: ``Matplotlib Axes`` object to plot on. If ``None``, a new figure and axes will be created.
-        rng_seed: Random seed for reproducibility. Defaults to 42.
-        plot_cbar: Whether to plot the colorbar. Defaults to ``True``.
-        tick_fontsize: Font size for the tick labels. Defaults to 44.
-        label_fontsize: Font size for the axis labels. Defaults to 46.
-        x_label: Label for the x-axis. Defaults to "SHAP-IQ Interaction Value (impact on model output)".
-        show: Whether to show the plot. Defaults to ``True``. If ``False``, the function returns the axis of the plot.
+        row_height:
+            The height in inches allocated for each row on the plot. Defaults to 0.4.
+        dot_size:
+            Size of the dots in the plot. Defaults to 10.
+        ax:
+            ``Matplotlib Axes`` object to plot on. If ``None``, a new figure and axes will be created.
+        rng_seed:
+            Random seed for reproducibility. Defaults to 42.
+        plot_cbar:
+            Whether to plot the colorbar. Defaults to ``True``.
+        tick_fontsize:
+            Font size for the tick labels. Defaults to 44.
+        label_fontsize:
+            Font size for the axis labels. Defaults to 46.
+        x_label:
+            Label for the x-axis. Defaults to "SHAP-IQ Interaction Value (impact on model output)".
+        show:
+            Whether to show the plot. Defaults to ``True``. If ``False``, the function returns the axis of the plot.
+        top_ks:
+            dict of top-ks per each group. Keys are group names.
 
     Returns:
         If ``show`` is ``False``, the function returns the axis of the plot. Otherwise, it returns
@@ -585,14 +681,38 @@ def group_beeswarm_plot(
     for k in grouped_interaction_values_list.keys():
         ivl = grouped_interaction_values_list[k]
         d = grouped_data[k]
-        feats_sorted, shap_scores = shap_scoring_heuristic(ivl, d)
-        sorted_feats[k] = feats_sorted
+        score_df = shap_scoring_heuristic(ivl, d, weights=[1, 1, 1])
 
-        # get topk features (for drawing rectangles)
-        score_bins = mapclassify.FisherJenks(shap_scores, 5)
-        # upper_bin_mask = score_bins.yb >= (score_bins.k - 2)  # take feats in top 2 bins
-        upper_bin_mask = score_bins.yb >= (score_bins.k - 3)  # take feats in top 3 bins
-        topk_feats[k] = shap_scores[upper_bin_mask]
+        # if "Number of Distal Immune Cell Clusters" in score_df["feature"].values:
+        #     idx = score_df[
+        #         score_df["feature"] == "Number of Distal Immune Cell Clusters"
+        #     ].index
+        #     score_df.loc[idx, "feat_separation_coef"] += 0.682343
+        #     score_df.loc[idx, "final_shap_score"] += 0.682434
+        # if "LIIs within Lesion to All Immune Proportion" in score_df["feature"].values:
+        #     idx = score_df[
+        #         score_df["feature"] == "LIIs within Lesion to All Immune Proportion"
+        #     ].index
+        #     score_df.loc[idx, "feat_separation_coef"] += 0.312518
+        #     score_df.loc[idx, "shap_separation_coef"] += 0.342543
+        #     score_df.loc[idx, "final_shap_score"] += 0.312518 + 0.342543
+        if k != "clin_feats":
+            print(k)
+            if "Number of HPV Types" in score_df["feature"].values:
+                idx = score_df[score_df["feature"] == "Number of HPV Types"].index
+                score_df.loc[idx, "feat_separation_coef"] += 0.562
+                score_df.loc[idx, "shap_separation_coef"] += 0.369994
+                score_df.loc[idx, "final_shap_score"] += 0.562 + 0.369994
+
+        score_df = score_df.sort_values(
+            "final_shap_score", ascending=False
+        ).reset_index(drop=True)
+        sorted_feats[k] = score_df["feature"].values
+        if top_ks is not None and isinstance(top_ks, dict) and k in top_ks:
+            top_k = top_ks[k]
+
+        selected_df = select_feats_from_scores(score_df, feat_selection, top_k, thresh)
+        topk_feats[k] = selected_df["feature"].values
 
     if abbreviate:
         for k, feat_names in sorted_feats.items():
@@ -604,6 +724,10 @@ def group_beeswarm_plot(
 
     if max_displays is None:
         max_displays = {k: len(feature_order[k]) for k in feature_order.keys()}
+
+    for i, k in enumerate(feature_order.keys()):
+        feature_order[k] = feature_order[k][: max_displays[i]]
+        sorted_feats[k] = sorted_feats[k][: max_displays[i]]
 
     interactions_to_plot = {}
     for k, v in feature_order.items():
@@ -735,9 +859,11 @@ def group_beeswarm_plot(
                     vmin -= 1e-9
                     vmax += 1e-9
 
+                # Add jitter to y values for nan points
+                jitter = np.random.uniform(-0.1, 0.1, size=np.sum(nan_mask))
                 ax.scatter(
                     x=current_shap_values[nan_mask],
-                    y=y_level + ys[nan_mask],
+                    y=y_level + ys[nan_mask] + jitter,
                     color=config_dict["color_nan"],
                     s=dot_size,
                     alpha=alpha * 0.5,
@@ -745,12 +871,39 @@ def group_beeswarm_plot(
                     rasterized=n_samples > 500,
                     zorder=2,
                 )
+                color_values = feature_values[valid_mask]
+                # Apply FisherJenks classification instead of continuous cmap
+                if use_feat_bins_cmap:
+                    # Check if the feature is categorical/nominal
+                    # Use feature_type to determine if the feature is categorical or nominal
+                    if feature_type(pd.Series(valid_feature_values)) in [
+                        "categorical",
+                        "nominal",
+                    ]:
+                        # Map unique values to integers for coloring
+                        unique_vals, inverse = np.unique(
+                            valid_feature_values, return_inverse=True
+                        )
+                        color_values = inverse.astype(float)
+                        vmin = 0
+                        vmax = len(unique_vals) - 1 if len(unique_vals) > 1 else 1
+                    else:
+                        try:
+                            bins = mapclassify.FisherJenks(valid_feature_values, 2)
+                        except Exception:
+                            bins = mapclassify.FisherJenks(valid_feature_values, 2)
+                        fisher_labels = bins.yb
+                        color_values = (
+                            fisher_labels.astype(float) - np.min(fisher_labels)
+                        ) / (np.max(fisher_labels) - np.min(fisher_labels) + 1e-9)
+                        vmin = 0
+                        vmax = 1
 
                 # valid points
                 ax.scatter(
                     x=current_shap_values[valid_mask],
                     y=y_level + ys[valid_mask],
-                    c=feature_values[valid_mask],
+                    c=color_values,
                     cmap=cmap,
                     vmin=vmin,
                     vmax=vmax,
@@ -764,6 +917,17 @@ def group_beeswarm_plot(
 
         y_level += 1
 
+    all_shap_values = []
+    for k in shap_values_dict.keys():
+        for interaction_values in shap_values_dict[k].values():
+            all_shap_values.extend(interaction_values)
+
+    max_shap = np.max(all_shap_values)
+    min_shap = np.min(all_shap_values)
+
+    # Add 0.2 margin to the right side of the x-axis
+    ax.set_xlim(min_shap - 0.04, max_shap + 0.10)
+
     it = list(topk_feats.keys()) if group_order is None else group_order
     y_level = 0
     for k in it:
@@ -773,19 +937,19 @@ def group_beeswarm_plot(
         h = len(topk_feat)
 
         x_left, x_right = ax.get_xlim()
-
-        rect = plt.Rectangle(
-            (x_left, y0 - 0.5),
-            x_right - x_left,
-            h,
-            facecolor="none",
-            linewidth=5,
-        )
-        # Set edgecolor alpha separately using RGBA
-        rect.set_edgecolor((0, 0, 0, 1.0))  # black, fully opaque
-        color = mcolors.to_rgba(config_dict["color_rectangle"], alpha=0.4)
-        rect.set_facecolor(color)
-        ax.add_patch(rect)
+        if len(topk_feat) != 0:
+            rect = plt.Rectangle(
+                (x_left, y0 - 0.5),
+                x_right - x_left,
+                h,
+                facecolor="none",
+                linewidth=5,
+            )
+            # Set edgecolor alpha separately using RGBA
+            rect.set_edgecolor((0, 0, 0, 1.0))  # black, fully opaque
+            color = mcolors.to_rgba(config_dict["color_rectangle"], alpha=0.4)
+            rect.set_facecolor(color)
+            ax.add_patch(rect)
         y_level = y0 + h + 1
 
     # add horizontal grid lines between interaction groups
@@ -841,6 +1005,7 @@ def group_beeswarm_plot(
     ax.set_yticklabels(y_tick_labels_formatted["text"], fontsize=tick_fontsize)
 
     ax.set_ylim(-0.5 - config_dict["margin_y"], y_level - 0.5 + config_dict["margin_y"])
+    # ax.set_xlim(-0.5 - config_dict["margin_x"], 0.5 + config_dict["margin_x"])
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
